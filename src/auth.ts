@@ -6,11 +6,8 @@ import { AnalyticsAdminServiceClient } from '@google-analytics/admin';
 
 const { AlphaAnalyticsDataClient } = v1alpha;
 
-// ─── MCP Bearer Token ───
-const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
-if (!MCP_AUTH_TOKEN) {
-  throw new Error('MCP_AUTH_TOKEN environment variable is required');
-}
+// ─── MCP Bearer Token (optional) ───
+const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || null;
 
 // ─── Google OAuth2 (user credentials) ───
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -31,6 +28,9 @@ let alphaDataClient: InstanceType<typeof AlphaAnalyticsDataClient> | null = null
 let adminClient: AnalyticsAdminServiceClient | null = null;
 
 export function validateBearerToken(req: IncomingMessage): boolean {
+  // If no MCP_AUTH_TOKEN is configured, allow all requests
+  if (!MCP_AUTH_TOKEN) return true;
+
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return false;

@@ -1,10 +1,5 @@
 import { IncomingMessage } from 'node:http';
 import { OAuth2Client } from 'google-auth-library';
-import { BetaAnalyticsDataClient } from '@google-analytics/data';
-import { v1alpha } from '@google-analytics/data';
-import { AnalyticsAdminServiceClient } from '@google-analytics/admin';
-
-const { AlphaAnalyticsDataClient } = v1alpha;
 
 // ─── MCP Bearer Token (optional) ───
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || null;
@@ -23,14 +18,11 @@ if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
 const oauth2Client = new OAuth2Client(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
 oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
 
-let dataClient: BetaAnalyticsDataClient | null = null;
-let alphaDataClient: InstanceType<typeof AlphaAnalyticsDataClient> | null = null;
-let adminClient: AnalyticsAdminServiceClient | null = null;
+let cachedToken: string | null = null;
+let tokenExpiry = 0;
 
 export function validateBearerToken(req: IncomingMessage): boolean {
-  // If no MCP_AUTH_TOKEN is configured, allow all requests
   if (!MCP_AUTH_TOKEN) return true;
-
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return false;
@@ -39,29 +31,81 @@ export function validateBearerToken(req: IncomingMessage): boolean {
   return token === MCP_AUTH_TOKEN;
 }
 
-export function getDataClient(): BetaAnalyticsDataClient {
-  if (!dataClient) {
-    dataClient = new BetaAnalyticsDataClient({
-      authClient: oauth2Client as never,
-    });
+export async function getAccessToken(): Promise<string> {
+  const now = Date.now();
+  if (cachedToken && now < tokenExpiry) {
+    return cachedToken;
   }
-  return dataClient;
+  const { credentials } = await oauth2Client.refreshAccessToken();
+  cachedToken = credentials.access_token || '';
+  // Expire 5 minutes early to be safe
+  tokenExpiry = now + ((credentials.expiry_date || now + 3600_000) - now) - 300_000;
+  return cachedToken;
 }
 
-export function getAlphaDataClient(): InstanceType<typeof AlphaAnalyticsDataClient> {
-  if (!alphaDataClient) {
-    alphaDataClient = new AlphaAnalyticsDataClient({
-      authClient: oauth2Client as never,
-    });
-  }
-  return alphaDataClient;
+const ADMIN_API = 'https://analyticsadmin.googleapis.com/v1beta';
+const DATA_API = 'https://analyticsdata.googleapis.com/v1beta';
+const ALPHA_DATA_API = 'https://analyticsdata.googleapis.com/v1alpha';
+
+export interface GoogleApiOptions {
+  method?: 'GET' | 'POST';
+  body?: unknown;
 }
 
-export function getAdminClient(): AnalyticsAdminServiceClient {
-  if (!adminClient) {
-    adminClient = new AnalyticsAdminServiceClient({
-      authClient: oauth2Client as never,
-    });
+export async function callAdminApi<T = unknown>(path: string, options: GoogleApiOptions = {}): Promise<T> {
+  const token = await getAccessToken();
+  const { method = 'GET', body } = options;
+  const resp = await fetch(`${ADMIN_API}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: { message: resp.statusText } }));
+    const error = new Error((err as { error?: { message?: string } }).error?.message || resp.statusText);
+    (error as { code?: number }).code = resp.status;
+    throw error;
   }
-  return adminClient;
+  return resp.json() as Promise<T>;
+}
+
+export async function callDataApi<T = unknown>(path: string, body?: unknown): Promise<T> {
+  const token = await getAccessToken();
+  const resp = await fetch(`${DATA_API}${path}`, {
+    method: body ? 'POST' : 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: { message: resp.statusText } }));
+    const error = new Error((err as { error?: { message?: string } }).error?.message || resp.statusText);
+    (error as { code?: number }).code = resp.status;
+    throw error;
+  }
+  return resp.json() as Promise<T>;
+}
+
+export async function callAlphaDataApi<T = unknown>(path: string, body: unknown): Promise<T> {
+  const token = await getAccessToken();
+  const resp = await fetch(`${ALPHA_DATA_API}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: { message: resp.statusText } }));
+    const error = new Error((err as { error?: { message?: string } }).error?.message || resp.statusText);
+    (error as { code?: number }).code = resp.status;
+    throw error;
+  }
+  return resp.json() as Promise<T>;
 }
